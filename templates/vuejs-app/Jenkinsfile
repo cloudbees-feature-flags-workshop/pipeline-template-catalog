@@ -1,0 +1,57 @@
+@Library('pipeline-library@master') _
+pipeline {
+  agent none
+  options { 
+    buildDiscarder(logRotator(numToKeepStr: '2'))
+    skipDefaultCheckout true
+    preserveStashes(buildCount: 2)
+    //timeout(time: 30, unit: 'MINUTES')
+  }
+  environment {
+    repoOwner = "${repoOwner}"
+    credId = "${githubCredentialId}"
+  }
+  stages('VueJS Test and Build')
+  {
+    stage('Build and Push Image') {
+      agent { label 'default-jnlp' }
+      when {
+        beforeAgent true
+        anyOf { branch 'main'; branch 'development'; branch 'PR-*' }
+      }
+      steps { 
+        yarnBuild() {
+          checkout scm
+          gitShortCommit()
+          gitHubDeploy(repoOwner, repository, "http://development.${repoOwner}-${repository}.${deploymentDomain}")
+          stash name: "k8s-deploy", includes: ".kubernetes/**"
+        }
+        containerBuildPushGeneric("vuejs-app/${repoOwner}/${repository}", "latest", "${gcpProject}") {
+          unstash "app"
+        }
+      }
+      post {
+        always {
+          unstash "output"
+          recordIssues enabledForFailure: true, aggregatingResults: true, tool: junitParser(pattern: 'output/coverage/junit/junit.xml')
+        }
+      }
+    }
+    stage('Deploy') {
+      when {
+        beforeAgent true
+        anyOf { branch 'main'; branch 'development'; branch 'PR-*' }
+      }
+      // options {
+      //   timeout(time: 90, unit: 'SECONDS') 
+      // }
+      steps {
+        //input(message: "Should we deploy?", ok: "Deploy", submitterParameter: "APPROVER")
+        blogKubeDeploy("${repository}", "${repoOwner}", "gcr.io/${gcpProject}/vuejs-app", "${deploymentDomain}") {
+          unstash "k8s-deploy"
+        }
+      }
+    }  
+  }
+}
+
